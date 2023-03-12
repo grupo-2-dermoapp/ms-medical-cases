@@ -5,6 +5,7 @@ from datetime import datetime
 from app.utils.utils import uuid4Str
 from .enums import *
 from app import db, ma
+from marshmallow import fields
 
 class MedicalCase(db.Model):
     uuid = Column(String(40), primary_key=True, default=uuid4Str)
@@ -33,10 +34,19 @@ class MedicalDiagnostic(db.Model):
 class Doctor(db.Model):
     uuid = Column(String(40), primary_key=True, nullable=False)
     location = Column(String(150), nullable=False)
+    diagnostics = db.relationship("MedicalDiagnostic", backref="doctor", lazy='dynamic')
 
 class Patient(db.Model):
     uuid = Column(String(40), primary_key=True, nullable=False)
     location = Column(String(150), nullable=False)
+    notifications = db.relationship('Notification', backref='patient', lazy=True)
+
+class Notification(db.Model):
+    uuid = Column(String(40), primary_key=True, nullable=False)
+    title = Column(String(40))
+    message = Column(String(100))
+    patient_uuid = db.Column(String(40), db.ForeignKey('patient.uuid'), nullable=False)
+
 
 class EnumField(ma.Field):
     def _serialize(self, value, attr, obj):
@@ -55,9 +65,23 @@ class MedicalCaseSchema(SQLAlchemyAutoSchema):
     body_part = EnumField()
     type_of_diagnosis = EnumField()
 
+class DoctorSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = Doctor
+        load_instance = True
+        exclude = ('location',)
+
 class MedicalDiagnosticSchema(SQLAlchemyAutoSchema):
+    
     class Meta:
         model = MedicalDiagnostic
         exclude = ('diagnostic_date',)
         load_instance = True
         include_relationships = True
+
+    doctor = fields.Nested(DoctorSchema)
+
+class NotificationSchema(SQLAlchemyAutoSchema):
+    class Meta:
+        model = Notification
+        
