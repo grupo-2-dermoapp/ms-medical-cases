@@ -1,24 +1,18 @@
 # -*- coding: utf-8 -*-
 
 from flask_restful import Resource
-from flask import request, current_app
-import validators
+from flask import request
 import requests
-from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.utils import secure_filename
 from app.models.models import Patient, Doctor, MedicalCase, MedicalDiagnostic, db
 from app.models.models import MedicalCaseSchema, MedicalDiagnosticSchema
-from itsdangerous import URLSafeTimedSerializer, SignatureExpired
+from app.models.models import Notification, NotificationSchema
 import os
 from sqlalchemy.exc import IntegrityError
-from flask_jwt_extended import create_access_token, create_refresh_token
-import datetime
-from flask_jwt_extended.view_decorators import jwt_required
-from flask_jwt_extended import get_jwt_identity, get_jwt
+from app.utils.utils import send_notification
+from faker import Faker
 import random
-import json
-import app
 
+fake = Faker()
 
 class Health(Resource):
     def get(self):
@@ -53,11 +47,11 @@ class PatientView(Resource):
     def post(self):
         request_data = request.json
         try:
-            doctor =  Patient(
+            patient =  Patient(
                 uuid = request_data['uuid'],
                 location = request_data['location']
             )
-            db.session.add(doctor)
+            db.session.add(patient)
             db.session.commit()
             data = {
                 "message" : "OK"
@@ -89,11 +83,21 @@ class MedicalCaseView(Resource):
             db.session.add(medical_case)
             db.session.commit()
 
+            medical_case_data = {
+                "uuid" : str(medical_case.uuid),
+                "location": "/dermoapp/medical-cases/v1/medical-cases/" + str(medical_case.uuid),
+                "patient_uuid" : request_data['patient_uuid']
+            }
+
+            requests.post(
+            os.getenv('CLINICAL_HISTORY_SERVICE')+"/dermoapp/clinical-history/v1/medical-cases",
+            json=medical_case_data)
+
             if medical_case.type_of_diagnosis.name == 'AUTO':
                 medical_diagnostic = MedicalDiagnostic(
-                    name_of_injury = "Diagnostico automatico",
-                    diagnosis = "Diagnostico automatico",
-                    treatment = "Diagnostico automatico",
+                    name_of_injury = fake.text(max_nb_chars=24),
+                    diagnosis = fake.text(max_nb_chars=200),
+                    treatment = fake.text(max_nb_chars=200),
                     certification_percentage = str(random.randrange(70,100)),
                     medical_case_uuid = medical_case.uuid
                 )
@@ -147,7 +151,7 @@ class MedicalCaseView(Resource):
             patient = db.session.query(Patient).filter(
                 Patient.uuid == medical_case.patient_uuid).first()
             patient_request_response = requests.get(
-                os.getenv('AUTH_SERVICE')+patient.location)
+                os.getenv('AUTH_SERVICE')+str(patient.location))
 
             if patient_request_response.status_code == 200:
                 patient_info = patient_request_response.json()
@@ -184,6 +188,29 @@ class MedicalCaseView(Resource):
 
         return data, 200
     
+class MedicalCaseById(Resource):
+    def get(self, medical_case_uuid):
+        medical_case = MedicalCase.query.filter_by(
+            uuid=medical_case_uuid
+        ).first()
+
+        if medical_case:
+            data = {
+                "code" : "",
+                "message" : "Información del caso médico",
+                "medical_case" : MedicalCaseSchema().dump(medical_case)
+            }
+
+            return data, 200
+        
+        else:
+            data = {
+                "code" : "",
+                "message" : "No se pudo completar la solicitud"
+            }
+
+            return data, 400
+    
 class MedicalDiagnosticView(Resource):
     def post(self):
         request_data = request.json
@@ -197,13 +224,42 @@ class MedicalDiagnosticView(Resource):
             )
 
             db.session.add(medical_diagnostic)
-            db.session.commit()
+            
 
             data = {
                 "code": "1250",
                 "message" : "Diagnostico medico registrado"
             }
 
+            medical_case = MedicalCase.query.filter_by(
+                uuid = request_data['medical_case_uuid']
+            ).first()
+
+            patient = db.session.query(Patient).filter(
+                Patient.uuid == medical_case.patient_uuid).first()
+
+            patient_request_response = requests.get(
+                os.getenv('AUTH_SERVICE')+str(patient.location))
+            
+            if patient_request_response.status_code == 200:
+                patient_info = patient_request_response.json()
+                notification_token = patient_info["notification_token"]
+                title = 'Diagnostico recibido'
+                message = 'Un doctor ha realizado el diagnostico de tu caso medico'
+                send_notification(
+                    title=title,
+                    message=message,
+                    token=notification_token)
+                
+                notification = Notification(
+                    title=title,
+                    message=message,
+                    patient_uuid=medical_case.patient_uuid
+                )
+
+                db.session.add(notification)
+
+            db.session.commit()   
             return data, 201
         
         except:
@@ -218,3 +274,72 @@ class MedicalDiagnosticView(Resource):
         
         finally:
             db.session.close()
+
+class MedicalDiagnosticByMedicalCaseview(Resource):
+    def get(self, medical_case_uuid):
+        medical_case = MedicalCase.query.filter_by(
+            uuid = medical_case_uuid
+        ).first()
+
+        if not medical_case:
+            data = {
+                "code" : "",
+                "message" : "No se pudo completar la solicitud"
+            }
+            return data, 400
+
+        medical_diagnostic = MedicalDiagnostic.query.filter_by(
+            medical_case_uuid = medical_case.uuid
+        ).first()
+
+        if not medical_diagnostic:
+            data = {
+                "code" : "",
+                "message" : "No se pudo completar la solicitud"
+            }
+            return data, 400
+        
+        data = {
+            "code" : "",
+            "message" : "",
+            "medical_diagnostic" : MedicalDiagnosticSchema().dump(medical_diagnostic),
+        }
+
+        return data, 200
+    
+class HistoryPatientNotificationView(Resource):
+    def get(self, patient_uuid):
+        notifications_list = []
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 2, type=int)
+        notifications = db.session.query(Notification).filter(
+            Notification.patient_uuid == patient_uuid
+        ).paginate(page=page, per_page=per_page)
+
+        for notification in notifications.items:
+            notifications_list.append(
+                NotificationSchema().dump(notification))
+
+        pagination_data = {
+            "page" : notifications.page,
+            "pages" : notifications.pages,
+            "total_data" : notifications.total,
+            "prev_num" : notifications.prev_num,
+            "next_num" : notifications.next_num,
+            "has_next" : notifications.has_next,
+            "has_prev" : notifications.has_prev
+        }
+
+        data = {
+            "code" : "",
+            "message" : "Listado de notificaciones",
+            "notifications" : notifications_list,
+            "paginator" : pagination_data
+        }
+
+        return data, 200
+
+class ReportView(Resource):
+    def get(self, doctor_uuid):
+
+        pass
