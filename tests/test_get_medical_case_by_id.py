@@ -1,4 +1,4 @@
-def get_medical_cases_with_bad_id(client):
+def test_get_medical_cases_with_bad_id(client):
     uuid_test = 'test'
     response = client.get("/dermoapp/medical-cases/v1/medical-cases/{}".format(uuid_test))
     data = response.json
